@@ -1,0 +1,18 @@
+{
+  "com_ports": [
+    "COM17",
+    "COM5"
+  ],
+  "reconnect_delay_seconds": 5,
+  "qa_excel_path": "C:\\Users\\bsourour\\OneDrive\\Desktop\\Quality Assurance 2026.xlsx",
+  "serial_probe_baud_rates": [
+    4800,
+    9600,
+    57600
+  ],
+  "serial_defaults": {
+    "data_bits": 8,
+    "parity": "N",
+    "stop_bits": 1.0
+  }
+}
