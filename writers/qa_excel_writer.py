@@ -804,12 +804,11 @@ def write_moisture_density_reading(
         sheet_name,
     )
 
-    machine_datetime = reading[
-        "machine_datetime"
-    ]
-
+    # The BeanPro's own clock is not calibrated, so its machine_datetime is kept
+    # for the CSV audit trail only. Column D uses the computer's date, matching
+    # the date written by write_sample_barcode_reading.
     excel_date = convert_to_excel_date(
-        machine_datetime
+        datetime.now()
     )
 
     worksheet.Cells(
