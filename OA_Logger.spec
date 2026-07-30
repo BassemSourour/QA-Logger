@@ -13,7 +13,9 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    # The window icon is loaded at runtime by ui/desktop_window.py, so it has to
+    # travel inside the bundle as well as being embedded in the exe resources.
+    datas=[('QA Logger.ico', '.')],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

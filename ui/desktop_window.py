@@ -1,3 +1,4 @@
+import logging
 import os
 import queue
 import threading
@@ -7,6 +8,7 @@ from tkinter import messagebox
 from tkinter import ttk
 
 from app.paths import LOG_DIR
+from app.paths import WINDOW_ICON_PATH
 
 
 class QALoggerWindow:
@@ -31,6 +33,8 @@ class QALoggerWindow:
         self.root.minsize(900, 560)
         self.root.state("zoomed")
 
+        self._apply_window_icon()
+
         self.status_text = tk.StringVar(value="Running")
         self.excel_status_text = tk.StringVar(value="Excel: Starting...")
         self.device_count_text = tk.StringVar(value="Connected Devices: 0")
@@ -41,6 +45,28 @@ class QALoggerWindow:
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.check_ui_queue()
+
+    def _apply_window_icon(self) -> None:
+        """
+        Sets the title bar and taskbar icon. Passing default= also applies it to
+        every Toplevel the app opens later, so the message boxes match.
+
+        The .ico is a bundled data file, so a missing or unreadable one must
+        degrade to the stock Tk icon rather than stop the app from opening.
+        """
+        try:
+            self.root.iconbitmap(
+                default=str(
+                    WINDOW_ICON_PATH
+                ),
+            )
+
+        except Exception as icon_error:
+            logging.warning(
+                "Could not load window icon from %s: %s",
+                WINDOW_ICON_PATH,
+                icon_error,
+            )
 
     def _setup_styles(self) -> None:
         self.style = ttk.Style()
