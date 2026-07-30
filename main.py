@@ -14,6 +14,7 @@ from services.mode_validation_service import (
     build_wrong_machine_mode_message,
     is_machine_test_allowed_for_mode,
 )
+from services.roaster_log_lookup_service import RoasterLogCache
 
 from ui.desktop_window import QALoggerWindow
 
@@ -116,12 +117,66 @@ def build_active_sample_from_barcode_reading(
     }
 
 
+def describe_roaster_log_data(
+    roaster_log_data,
+) -> str:
+    if not roaster_log_data:
+        return "not found"
+
+    return (
+        f"roaster {roaster_log_data.get('roaster_number')} | "
+        f"lbs {roaster_log_data.get('quantity_roasted')} | "
+        f"temp {roaster_log_data.get('end_temperature')} | "
+        f"sheet {roaster_log_data.get('source_sheet')} | "
+        f"rows {len(roaster_log_data.get('source_rows', []))}"
+    )
+
+
+def get_roaster_log_data_for_reading(
+    reading: dict,
+    roaster_log_cache,
+):
+    """
+    Looks up roaster production data before the Excel write.
+
+    A lookup failure must never stop a sample from being recorded, so every
+    error here is logged and treated as "not found".
+    """
+    if roaster_log_cache is None:
+        return None
+
+    try:
+        return roaster_log_cache.get_roaster_log_data(
+            reading["batch_ticket"]
+        )
+
+    except Exception:
+        logging.exception(
+            "Roaster log lookup failed for batch %s",
+            reading.get(
+                "batch_ticket"
+            ),
+        )
+
+        return None
+
+
 def handle_sample_barcode_reading(
     reading: dict,
     ui_queue: queue.Queue,
     excel_session: dict,
     excel_path,
+    roaster_log_cache=None,
 ) -> dict:
+    roaster_log_data = get_roaster_log_data_for_reading(
+        reading=reading,
+        roaster_log_cache=roaster_log_cache,
+    )
+
+    reading[
+        "roaster_log_data"
+    ] = roaster_log_data
+
     sheet_name, row_number = write_reading_to_excel(
         reading=reading,
         excel_session=excel_session,
@@ -160,11 +215,14 @@ def handle_sample_barcode_reading(
     )
 
     logging.info(
-        "%s | batch=%s | sheet=%s | row=%s",
+        "%s | batch=%s | sheet=%s | row=%s | roaster_log=%s",
         action_text,
         display_batch_ticket,
         sheet_name,
         row_number,
+        describe_roaster_log_data(
+            roaster_log_data
+        ),
     )
 
     return active_roasting_sample
@@ -253,6 +311,18 @@ def handle_generic_roasting_reading(
     )
 
 
+def prewarm_roaster_log_cache(
+    roaster_log_cache,
+) -> None:
+    try:
+        roaster_log_cache.refresh()
+
+    except Exception:
+        logging.exception(
+            "Could not prewarm the roaster log lookup."
+        )
+
+
 def backend_worker(
     ui_queue: queue.Queue,
     stop_event: threading.Event,
@@ -294,6 +364,31 @@ def backend_worker(
         excel_session = connect_to_excel(
             excel_path
         )
+
+        # Reading both roaster logs takes a few seconds because they are large
+        # files on a network share. Warming the cache here means the first
+        # barcode scan does not have to wait for it.
+        roaster_log_cache = RoasterLogCache(
+            config
+        )
+
+        if roaster_log_cache.is_enabled():
+            prewarm_thread = threading.Thread(
+                target=prewarm_roaster_log_cache,
+                args=(
+                    roaster_log_cache,
+                ),
+                daemon=True,
+            )
+
+            prewarm_thread.start()
+
+        else:
+            logging.info(
+                "Roaster log lookup is disabled. "
+                "Quantity roasted, end temperature, and roaster number "
+                "will be left blank."
+            )
 
         send_ui_message(
             ui_queue,
@@ -424,6 +519,7 @@ def backend_worker(
                             ui_queue=ui_queue,
                             excel_session=excel_session,
                             excel_path=excel_path,
+                            roaster_log_cache=roaster_log_cache,
                         )
 
                         continue

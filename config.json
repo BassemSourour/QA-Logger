@@ -10,9 +10,22 @@
     9600,
     57600
   ],
+  "serial_probe_window_seconds": 20,
+  "port_baud_rates": {},
   "serial_defaults": {
     "data_bits": 8,
     "parity": "N",
     "stop_bits": 1.0
-  }
+  },
+  "roaster_logs": [
+    {
+      "roaster_number": 1,
+      "excel_path": "S:\\Roasterone\\2026\\Roaster #1 Log 2026 .xlsx"
+    },
+    {
+      "roaster_number": 2,
+      "excel_path": "S:\\Roastertwo\\2026\\Copy of Roaster 2  New log 2025.xlsx"
+    }
+  ],
+  "roaster_log_cache_seconds": 120
 }

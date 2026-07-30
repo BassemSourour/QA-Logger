@@ -176,6 +176,67 @@ def get_probe_baud_rates(
     return clean_baud_rates
 
 
+def get_probe_window_seconds(
+    config: dict,
+) -> float:
+    try:
+        window_seconds = float(
+            config.get(
+                "serial_probe_window_seconds",
+                20,
+            )
+        )
+
+    except Exception:
+        return 20.0
+
+    if window_seconds <= 0:
+        return 20.0
+
+    return window_seconds
+
+
+def get_configured_baud_rate_for_port(
+    com_port: str,
+    config: dict,
+):
+    """
+    Returns the known baud rate for this port from config, if there is one.
+
+    A port listed in port_baud_rates never gets probed, so the very first
+    reading from that device cannot be lost to a wrong-baud window.
+    """
+    port_baud_rates = config.get(
+        "port_baud_rates"
+    ) or {}
+
+    if not isinstance(
+        port_baud_rates,
+        dict,
+    ):
+        return None
+
+    port_name = str(
+        com_port
+    ).strip().upper()
+
+    for configured_port, baud_rate in port_baud_rates.items():
+        if str(
+            configured_port
+        ).strip().upper() != port_name:
+            continue
+
+        try:
+            return int(
+                baud_rate
+            )
+
+        except Exception:
+            return None
+
+    return None
+
+
 def get_serial_defaults(
     config: dict,
 ) -> dict:
@@ -189,15 +250,55 @@ def get_serial_defaults(
     )
 
 
-def is_port_still_connected(
-    com_port: str,
-) -> bool:
+PORT_PRESENCE_CACHE_SECONDS = 2.0
+
+_port_presence_lock = threading.Lock()
+
+_port_presence_cache = {
+    "checked_at": 0.0,
+    "ports": set(),
+}
+
+
+def get_available_port_names() -> set:
+    """
+    Enumerating COM ports is expensive, and this is checked once per serial
+    read. Without this cache a single listener runs a full device enumeration
+    every second, which slows the read loop down enough to matter.
+    """
+    now = time.time()
+
+    with _port_presence_lock:
+        age = now - _port_presence_cache[
+            "checked_at"
+        ]
+
+        if age < PORT_PRESENCE_CACHE_SECONDS:
+            return _port_presence_cache[
+                "ports"
+            ]
+
     current_ports = {
         port.device
         for port in list_ports.comports()
     }
 
-    return com_port in current_ports
+    with _port_presence_lock:
+        _port_presence_cache[
+            "ports"
+        ] = current_ports
+
+        _port_presence_cache[
+            "checked_at"
+        ] = time.time()
+
+    return current_ports
+
+
+def is_port_still_connected(
+    com_port: str,
+) -> bool:
+    return com_port in get_available_port_names()
 
 
 def open_serial_device(
@@ -260,6 +361,48 @@ def decode_serial_bytes(
     )
 
 
+MINIMUM_PRINTABLE_RATIO = 0.8
+
+
+def looks_like_device_text(
+    serial_bytes: bytes,
+) -> bool:
+    """
+    Tells a wrong baud rate apart from unparsed-but-readable text.
+
+    At the wrong baud rate a device produces mostly non-printable bytes. Because
+    decoding uses errors="replace", that garbage turns into readable question
+    marks and becomes indistinguishable from real text, so the decision has to
+    be made on the raw bytes.
+    """
+    if not serial_bytes:
+        return False
+
+    printable_count = 0
+
+    for byte_value in serial_bytes:
+        is_printable = 32 <= byte_value <= 126
+
+        is_whitespace = byte_value in (
+            9,
+            10,
+            13,
+        )
+
+        # Devices pad with NULs, which say nothing either way.
+        if byte_value == 0:
+            printable_count += 1
+
+        elif is_printable or is_whitespace:
+            printable_count += 1
+
+    ratio = printable_count / len(
+        serial_bytes
+    )
+
+    return ratio >= MINIMUM_PRINTABLE_RATIO
+
+
 def process_display_line(
     com_port: str,
     baud_rate: int,
@@ -314,6 +457,13 @@ def process_display_line(
         f"{com_port}: Input received, but the format is not recognized.",
     )
 
+    logging.warning(
+        "Unrecognized input on %s at %s baud | raw=%r",
+        com_port,
+        baud_rate,
+        display_line,
+    )
+
     return False
 
 
@@ -325,15 +475,40 @@ def find_working_baud_rate(
     stop_event: threading.Event,
 ) -> int | None:
     """
-    Cycles through known baud rates silently until a parser recognizes input.
+    Finds the baud rate a device is talking at.
 
-    Important:
-    - A COM port cannot be opened at multiple baud rates at the exact same time.
-    - This function rotates through the configured baud rates.
-    - When it sees a recognizable line, it processes that line immediately
-      and returns the working baud rate.
+    A COM port can only be open at one baud rate at a time, so the baud rate
+    has to be discovered by listening. The rule is to rotate on garbage, not on
+    a timer:
+
+    - If the port is listed in port_baud_rates, use that and do not probe.
+    - While the port is silent, stay on the current baud rate. Rotating during
+      silence is what used to lose readings: the device prints once and does not
+      repeat, so a reopen at the wrong moment threw the reading away.
+    - As soon as bytes arrive, judge them. Mostly non-printable means the baud
+      rate is wrong, so rotate immediately. Readable text means this baud rate
+      is plausible, so keep listening on it for serial_probe_window_seconds.
+    - Recognized input, or a known auxiliary line, locks the baud rate in.
     """
+    configured_baud_rate = get_configured_baud_rate_for_port(
+        com_port=com_port,
+        config=config,
+    )
+
+    if configured_baud_rate is not None:
+        logging.info(
+            "Using configured baud rate for %s: %s baud. Skipping probe.",
+            com_port,
+            configured_baud_rate,
+        )
+
+        return configured_baud_rate
+
     baud_rates = get_probe_baud_rates(
+        config
+    )
+
+    probe_window_seconds = get_probe_window_seconds(
         config
     )
 
@@ -368,11 +543,12 @@ def find_working_baud_rate(
                         baud_rate,
                     )
 
-                    start_time = time.time()
+                    # Armed only once readable text arrives. While the port is
+                    # silent there is nothing to judge, so we keep waiting here
+                    # instead of rotating and risking a missed print.
+                    deadline = None
 
-                    while (
-                        time.time() - start_time
-                    ) < 3:
+                    while True:
                         if stop_event.is_set():
                             return None
 
@@ -389,6 +565,42 @@ def find_working_baud_rate(
 
                         except OSError:
                             return None
+
+                        if not serial_bytes:
+                            if (
+                                deadline is not None
+                                and time.time() > deadline
+                            ):
+                                logging.info(
+                                    "No recognizable input on %s at %s baud "
+                                    "within %s seconds. Trying the next baud rate.",
+                                    com_port,
+                                    baud_rate,
+                                    probe_window_seconds,
+                                )
+
+                                break
+
+                            continue
+
+                        if not looks_like_device_text(
+                            serial_bytes
+                        ):
+                            logging.info(
+                                "Unreadable bytes on %s at %s baud. "
+                                "Trying the next baud rate. raw=%r",
+                                com_port,
+                                baud_rate,
+                                serial_bytes[:40],
+                            )
+
+                            break
+
+                        if deadline is None:
+                            deadline = (
+                                time.time()
+                                + probe_window_seconds
+                            )
 
                         display_line = decode_serial_bytes(
                             serial_bytes
@@ -440,6 +652,14 @@ def find_working_baud_rate(
                             )
 
                             return baud_rate
+
+                        logging.warning(
+                            "Readable but unrecognized input while probing %s "
+                            "at %s baud | raw=%r",
+                            com_port,
+                            baud_rate,
+                            display_line,
+                        )
 
             except SerialException:
                 continue

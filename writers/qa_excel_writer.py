@@ -21,13 +21,6 @@ ROAST_SPEC_COLUMN = 11
 ACTUAL_COLOR_COLUMN = 12
 END_TEMPERATURE_COLUMN = 13
 ROASTER_NUMBER_COLUMN = 14
-PRESENTATION_ROASTER_DATA = {
-    "96560": {
-        "quantity_roasted": 3920,
-        "end_temperature": 432,
-        "roaster_number": 2,
-    },
-}
 ROASTING_START_COLUMN = 1
 ROASTING_END_COLUMN = 15
 
@@ -647,15 +640,17 @@ def write_sample_barcode_reading(
             "excel_batch_ticket"
         ] = excel_batch_ticket
 
-        hardcoded_roaster_data_applied = apply_hardcoded_roaster_data_for_presentation(
+        roaster_log_data_applied = apply_roaster_log_data(
             worksheet=worksheet,
             row_number=row_number,
-            batch_ticket=excel_batch_ticket,
+            roaster_log_data=reading.get(
+                "roaster_log_data"
+            ),
         )
 
         reading[
-            "hardcoded_roaster_data_applied"
-        ] = hardcoded_roaster_data_applied
+            "roaster_log_data_applied"
+        ] = roaster_log_data_applied
 
         center_row_cells(
             worksheet=worksheet,
@@ -725,15 +720,17 @@ def write_sample_barcode_reading(
         "color_range_text"
     ]
 
-    hardcoded_roaster_data_applied = apply_hardcoded_roaster_data_for_presentation(
+    roaster_log_data_applied = apply_roaster_log_data(
         worksheet=worksheet,
         row_number=row_number,
-        batch_ticket=excel_batch_ticket,
+        roaster_log_data=reading.get(
+            "roaster_log_data"
+        ),
     )
 
     reading[
-        "hardcoded_roaster_data_applied"
-    ] = hardcoded_roaster_data_applied
+        "roaster_log_data_applied"
+    ] = roaster_log_data_applied
 
     center_row_cells(
         worksheet=worksheet,
@@ -917,46 +914,60 @@ def write_reading_to_excel(
         f"No Excel writer is configured for test type: {test_type}"
     )
 
-def apply_hardcoded_roaster_data_for_presentation(
+def apply_roaster_log_data(
     worksheet,
     row_number: int,
-    batch_ticket,
+    roaster_log_data,
 ) -> bool:
-    batch_key = normalize_batch_ticket_for_excel(
-        batch_ticket
-    )
+    """
+    Writes the production values looked up from the roaster logs.
 
-    roaster_data = PRESENTATION_ROASTER_DATA.get(
-        batch_key
-    )
-
-    if roaster_data is None:
+    The lookup itself runs on the backend worker before this function is
+    called, so no roaster log file reading happens on the Excel write path.
+    Cells are left untouched when the batch ticket was not found or a value is
+    missing, so nothing already in the sheet gets overwritten with a blank.
+    """
+    if not roaster_log_data:
         return False
 
-    worksheet.Cells(
-        row_number,
-        QUANTITY_ROASTED_COLUMN,
-    ).Value = roaster_data[
-        "quantity_roasted"
+    values_by_column = [
+        (
+            QUANTITY_ROASTED_COLUMN,
+            roaster_log_data.get(
+                "quantity_roasted"
+            ),
+        ),
+        (
+            END_TEMPERATURE_COLUMN,
+            roaster_log_data.get(
+                "end_temperature"
+            ),
+        ),
+        (
+            ROASTER_NUMBER_COLUMN,
+            roaster_log_data.get(
+                "roaster_number"
+            ),
+        ),
     ]
 
-    worksheet.Cells(
-        row_number,
-        END_TEMPERATURE_COLUMN,
-    ).Value = roaster_data[
-        "end_temperature"
-    ]
+    wrote_any_value = False
 
-    worksheet.Cells(
-        row_number,
-        ROASTER_NUMBER_COLUMN,
-    ).Value = roaster_data[
-        "roaster_number"
-    ]
+    for column_number, value in values_by_column:
+        if value is None:
+            continue
 
-    center_row_cells(
-        worksheet=worksheet,
-        row_number=row_number,
-    )
+        worksheet.Cells(
+            row_number,
+            column_number,
+        ).Value = value
 
-    return True
+        wrote_any_value = True
+
+    if wrote_any_value:
+        center_row_cells(
+            worksheet=worksheet,
+            row_number=row_number,
+        )
+
+    return wrote_any_value
